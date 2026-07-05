@@ -2,7 +2,17 @@
 
 Shell helper for batch-syncing local Git repositories.
 
-Config is stored beside the script:
+## Check list
+
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/333a9931-5454-4d05-bdc8-d168f9646d67" />
+
+## Sync result
+
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/87437415-f3d0-4c22-bc65-28855bdb8af4" />
+
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/7e620dc5-bf8d-4830-b0ee-3b909f6695a6" />
+
+## Config is stored beside the script:
 
 ```text
 repo-sync-data/repos.tsv
