@@ -4,7 +4,7 @@ Shell helper for batch-syncing local Git repositories.
 
 ## Check list
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/333a9931-5454-4d05-bdc8-d168f9646d67" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/6f88ff28-032e-4a3a-9bce-8045d52e2ab8" />
 
 ## Sync result
 
