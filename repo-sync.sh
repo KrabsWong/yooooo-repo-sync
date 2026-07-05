@@ -2,6 +2,11 @@
 set -u
 
 DEFAULT_STRATEGY="rebase"
+LIST_NAME_WIDTH=24
+LIST_STRATEGY_WIDTH=8
+LIST_SUBMODULES_WIDTH=10
+LIST_UPDATES_WIDTH=10
+LIST_UPDATES_COLUMN=$((LIST_NAME_WIDTH + 2 + LIST_STRATEGY_WIDTH + 2 + LIST_SUBMODULES_WIDTH + 2 + 1))
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${REPO_SYNC_HOME:-"$SCRIPT_DIR/repo-sync-data"}"
 CONFIG_FILE="$CONFIG_DIR/repos.tsv"
@@ -10,7 +15,7 @@ usage() {
   cat <<'EOF'
 Usage:
   repo-sync.sh add <path> [--name <name>] [--strategy rebase|merge] [--submodules|--no-submodules]
-  repo-sync.sh list
+  repo-sync.sh list [--fetch|--no-fetch]
   repo-sync.sh remove <name-or-path>
   repo-sync.sh set <name-or-path> [--name <name>] [--path <path>] [--strategy rebase|merge] [--submodules|--no-submodules]
   repo-sync.sh sync [name-or-path ...] [--strategy rebase|merge] [--allow-dirty]
@@ -213,22 +218,260 @@ cmd_add() {
   echo "Added: $name -> $path ($strategy, submodules=$submodules)"
 }
 
+print_list_header() {
+  printf "%b%-${LIST_NAME_WIDTH}s  %-${LIST_STRATEGY_WIDTH}s  %-${LIST_SUBMODULES_WIDTH}s  %-${LIST_UPDATES_WIDTH}s  %s%b\n" \
+    "$C_BOLD" "name" "strategy" "submodules" "updates" "path" "$C_RESET"
+  printf "%b%-${LIST_NAME_WIDTH}s  %-${LIST_STRATEGY_WIDTH}s  %-${LIST_SUBMODULES_WIDTH}s  %-${LIST_UPDATES_WIDTH}s  %s%b\n" \
+    "$C_DIM" "----" "--------" "----------" "-------" "----" "$C_RESET"
+}
+
+print_colored_field() {
+  local width="$1"
+  local text="$2"
+  local color="$3"
+  local padded
+  printf -v padded "%-${width}s" "$text"
+  printf '%b%s%b' "$color" "$padded" "$C_RESET"
+}
+
+list_submodules_color() {
+  case "$1" in
+    true) printf '%s' "$C_CYAN" ;;
+    false) printf '%s' "$C_DIM" ;;
+    *) printf '%s' "$C_YELLOW" ;;
+  esac
+}
+
+list_updates_color() {
+  case "$1" in
+    yes) printf '%s' "$C_GREEN" ;;
+    no) printf '%s' "$C_DIM" ;;
+    unknown) printf '%s' "$C_YELLOW" ;;
+    pending) printf '%s' "$C_DIM" ;;
+    fetching*) printf '%s' "$C_BLUE" ;;
+    *) printf '%s' "$C_RESET" ;;
+  esac
+}
+
+print_list_row_no_newline() {
+  local name="$1"
+  local strategy="$2"
+  local submodules="$3"
+  local updates="$4"
+  local path="$5"
+  print_colored_field "$LIST_NAME_WIDTH" "$name" "$C_BOLD"
+  printf '  '
+  print_colored_field "$LIST_STRATEGY_WIDTH" "$strategy" "$C_CYAN"
+  printf '  '
+  print_colored_field "$LIST_SUBMODULES_WIDTH" "$submodules" "$(list_submodules_color "$submodules")"
+  printf '  '
+  print_colored_field "$LIST_UPDATES_WIDTH" "$updates" "$(list_updates_color "$updates")"
+  printf '  %b%s%b' "$C_DIM" "$path" "$C_RESET"
+}
+
+print_list_row() {
+  print_list_row_no_newline "$@"
+  printf '\n'
+}
+
+can_live_update_list() {
+  [[ -t 1 && "${TERM:-}" != "dumb" ]]
+}
+
+update_list_updates_field() {
+  local row_index="$1"
+  local row_count="$2"
+  local updates="$3"
+
+  local lines_up=$((row_count - row_index + 1))
+  printf '\033[%sA' "$lines_up"
+  printf '\033[%sG' "$LIST_UPDATES_COLUMN"
+  print_colored_field "$LIST_UPDATES_WIDTH" "$updates" "$(list_updates_color "$updates")"
+  printf '\033[%sB' "$lines_up"
+  printf '\r'
+}
+
+supports_unicode_spinner() {
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *UTF-8*|*utf8*|*UTF8*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+list_spinner_label() {
+  local frame_index="$1"
+
+  if supports_unicode_spinner; then
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    printf 'fetching %s' "${frames[$((frame_index % ${#frames[@]}))]}"
+  else
+    local frames=("-" "\\" "|" "/")
+    printf 'fetching %s' "${frames[$((frame_index % ${#frames[@]}))]}"
+  fi
+}
+
+list_update_worker() {
+  local path="$1"
+  local refresh="$2"
+  local result_file="$3"
+
+  if ! repo_update_label "$path" "$refresh" > "$result_file"; then
+    printf 'unknown\n' > "$result_file"
+  fi
+  if [[ ! -s "$result_file" ]]; then
+    printf 'unknown\n' > "$result_file"
+  fi
+}
+
+list_result_label() {
+  local result_file="$1"
+  local updates
+  updates="$(sed -n '1p' "$result_file" 2>/dev/null)"
+  case "$updates" in
+    yes|no|unknown) printf '%s\n' "$updates" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+cmd_list_live_fetch() {
+  local names=()
+  local paths=()
+  local strategies=()
+  local submodules_values=()
+  local result_files=()
+  local pids=()
+  local done_flags=()
+
+  local name path strategy submodules
+  while IFS=$'\t' read -r name path strategy submodules; do
+    [[ -z "${name:-}" ]] && continue
+    names+=("$name")
+    paths+=("$path")
+    strategies+=("$strategy")
+    submodules_values+=("$submodules")
+  done < "$CONFIG_FILE"
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync-list.XXXXXX")" || die "cannot create temp dir"
+
+  echo "Config: $CONFIG_FILE"
+  print_list_header
+
+  local row_count="${#names[@]}"
+  local index
+  for ((index = 0; index < row_count; index++)); do
+    print_list_row "${names[$index]}" "${strategies[$index]}" "${submodules_values[$index]}" "pending" "${paths[$index]}"
+    result_files+=("$tmp_dir/$index.status")
+    done_flags+=("false")
+    list_update_worker "${paths[$index]}" "true" "${result_files[$index]}" &
+    pids+=("$!")
+  done
+
+  local remaining="$row_count"
+  local frame_index=0
+  local updates
+  while [[ "$remaining" -gt 0 ]]; do
+    for ((index = 0; index < row_count; index++)); do
+      [[ "${done_flags[$index]}" == "true" ]] && continue
+
+      if [[ -s "${result_files[$index]}" ]]; then
+        updates="$(list_result_label "${result_files[$index]}")"
+        update_list_updates_field "$((index + 1))" "$row_count" "$updates"
+        done_flags[$index]="true"
+        remaining=$((remaining - 1))
+      else
+        update_list_updates_field "$((index + 1))" "$row_count" "$(list_spinner_label "$frame_index")"
+      fi
+    done
+
+    if [[ "$remaining" -gt 0 ]]; then
+      sleep 0.08
+      frame_index=$((frame_index + 1))
+    fi
+  done
+
+  for ((index = 0; index < row_count; index++)); do
+    wait "${pids[$index]}" >/dev/null 2>&1 || true
+  done
+  rm -rf "$tmp_dir"
+}
+
+cmd_list_parallel_plain() {
+  local refresh="$1"
+  local names=()
+  local paths=()
+  local strategies=()
+  local submodules_values=()
+  local result_files=()
+  local pids=()
+
+  local name path strategy submodules
+  while IFS=$'\t' read -r name path strategy submodules; do
+    [[ -z "${name:-}" ]] && continue
+    names+=("$name")
+    paths+=("$path")
+    strategies+=("$strategy")
+    submodules_values+=("$submodules")
+  done < "$CONFIG_FILE"
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync-list.XXXXXX")" || die "cannot create temp dir"
+
+  local row_count="${#names[@]}"
+  local index
+  for ((index = 0; index < row_count; index++)); do
+    result_files+=("$tmp_dir/$index.status")
+    list_update_worker "${paths[$index]}" "$refresh" "${result_files[$index]}" &
+    pids+=("$!")
+  done
+
+  for ((index = 0; index < row_count; index++)); do
+    wait "${pids[$index]}" >/dev/null 2>&1 || true
+  done
+
+  echo "Config: $CONFIG_FILE"
+  print_list_header
+
+  local updates
+  for ((index = 0; index < row_count; index++)); do
+    updates="$(list_result_label "${result_files[$index]}")"
+    print_list_row "${names[$index]}" "${strategies[$index]}" "${submodules_values[$index]}" "$updates" "${paths[$index]}"
+  done
+
+  rm -rf "$tmp_dir"
+}
+
 cmd_list() {
   ensure_config
+
+  local refresh="true"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fetch)
+        refresh="true"
+        shift
+        ;;
+      --no-fetch)
+        refresh="false"
+        shift
+        ;;
+      *)
+        die "unknown list option: $1"
+        ;;
+    esac
+  done
+
   if [[ ! -s "$CONFIG_FILE" ]]; then
     echo "No repositories registered. Config: $CONFIG_FILE"
     return
   fi
 
-  echo "Config: $CONFIG_FILE"
-  printf '%-24s  %-8s  %-10s  %s\n' "name" "strategy" "submodules" "path"
-  printf '%-24s  %-8s  %-10s  %s\n' "----" "--------" "----------" "----"
+  if [[ "$refresh" == "true" ]] && can_live_update_list; then
+    cmd_list_live_fetch
+    return
+  fi
 
-  local name path strategy submodules
-  while IFS=$'\t' read -r name path strategy submodules; do
-    [[ -z "${name:-}" ]] && continue
-    printf '%-24s  %-8s  %-10s  %s\n' "$name" "$strategy" "$submodules" "$path"
-  done < "$CONFIG_FILE"
+  cmd_list_parallel_plain "$refresh"
 }
 
 cmd_remove() {
@@ -336,6 +579,49 @@ git_logged() {
   git -C "$repo_path" "$@"
 }
 
+git_fetch_quiet() {
+  git -C "$1" fetch --quiet --prune --tags >/dev/null 2>&1
+}
+
+repo_upstream() {
+  git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null
+}
+
+repo_remote_update_count() {
+  local count
+  count="$(git -C "$1" rev-list --count 'HEAD..@{u}' 2>/dev/null)" || return 1
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$count"
+}
+
+repo_update_label() {
+  local path="$1"
+  local refresh="${2:-false}"
+  if [[ ! -d "$path" ]] || ! is_git_repo "$path"; then
+    printf 'unknown\n'
+    return
+  fi
+  if [[ -z "$(repo_upstream "$path")" ]]; then
+    printf 'unknown\n'
+    return
+  fi
+  if [[ "$refresh" == "true" ]] && ! git_fetch_quiet "$path"; then
+    printf 'unknown\n'
+    return
+  fi
+
+  local update_count
+  update_count="$(repo_remote_update_count "$path")" || {
+    printf 'unknown\n'
+    return
+  }
+  if [[ "$update_count" -gt 0 ]]; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 sync_one() {
   local name="$1"
   local path="$2"
@@ -351,25 +637,6 @@ sync_one() {
   fi
   if ! is_git_repo "$path"; then
     status SKIP "Not a git repository: $path"
-    return 10
-  fi
-
-  local dirty
-  dirty="$(git -C "$path" status --porcelain=v1 --untracked-files=normal 2>&1)"
-  if [[ $? -ne 0 ]]; then
-    status FAIL "Cannot read git status:"
-    echo "$dirty"
-    return 20
-  fi
-
-  if [[ -n "$dirty" && "$allow_dirty" != "true" ]]; then
-    status SKIP "$name: working tree has local changes."
-    echo "$dirty" | sed 's/^/       /' | head -n 20
-    local dirty_count
-    dirty_count="$(echo "$dirty" | wc -l | tr -d ' ')"
-    if [[ "$dirty_count" -gt 20 ]]; then
-      echo "       ... $((dirty_count - 20)) more lines"
-    fi
     return 10
   fi
 
@@ -393,6 +660,37 @@ sync_one() {
     status FAIL "fetch failed for $name"
     return 20
   }
+
+  local update_count
+  update_count="$(repo_remote_update_count "$path")" || {
+    status FAIL "Cannot compare $branch with $upstream."
+    return 20
+  }
+  if [[ "$update_count" -eq 0 ]]; then
+    status SKIP "$name: no updates; already up to date with $upstream."
+    return 10
+  fi
+
+  status INFO "remote updates=$update_count"
+
+  local dirty
+  dirty="$(git -C "$path" status --porcelain=v1 --untracked-files=normal 2>&1)"
+  if [[ $? -ne 0 ]]; then
+    status FAIL "Cannot read git status:"
+    echo "$dirty"
+    return 20
+  fi
+
+  if [[ -n "$dirty" && "$allow_dirty" != "true" ]]; then
+    status SKIP "$name: working tree has local changes."
+    echo "$dirty" | sed 's/^/       /' | head -n 20
+    local dirty_count
+    dirty_count="$(echo "$dirty" | wc -l | tr -d ' ')"
+    if [[ "$dirty_count" -gt 20 ]]; then
+      echo "       ... $((dirty_count - 20)) more lines"
+    fi
+    return 10
+  fi
 
   case "$strategy" in
     rebase)
