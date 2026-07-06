@@ -580,16 +580,40 @@ git_logged() {
 }
 
 git_fetch_quiet() {
-  git -C "$1" fetch --quiet --prune --tags >/dev/null 2>&1
+  git -C "$1" fetch --quiet --prune >/dev/null 2>&1
 }
 
 repo_upstream() {
   git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null
 }
 
+repo_current_branch() {
+  git -C "$1" branch --show-current 2>/dev/null
+}
+
+repo_branch_compare_ref() {
+  local repo_path="$1"
+  local branch="$2"
+  local upstream
+  upstream="$(repo_upstream "$repo_path")"
+  if [[ -n "$upstream" ]]; then
+    printf '%s\n' "$upstream"
+    return
+  fi
+
+  if git -C "$repo_path" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    printf 'origin/%s\n' "$branch"
+    return
+  fi
+
+  return 1
+}
+
 repo_remote_update_count() {
+  local repo_path="$1"
+  local compare_ref="$2"
   local count
-  count="$(git -C "$1" rev-list --count 'HEAD..@{u}' 2>/dev/null)" || return 1
+  count="$(git -C "$repo_path" rev-list --count "HEAD..$compare_ref" 2>/dev/null)" || return 1
   [[ "$count" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$count"
 }
@@ -601,17 +625,27 @@ repo_update_label() {
     printf 'unknown\n'
     return
   fi
-  if [[ -z "$(repo_upstream "$path")" ]]; then
+
+  local branch
+  branch="$(repo_current_branch "$path")"
+  if [[ -z "$branch" ]]; then
     printf 'unknown\n'
     return
   fi
+
   if [[ "$refresh" == "true" ]] && ! git_fetch_quiet "$path"; then
     printf 'unknown\n'
     return
   fi
 
+  local compare_ref
+  compare_ref="$(repo_branch_compare_ref "$path" "$branch")" || {
+    printf 'unknown\n'
+    return
+  }
+
   local update_count
-  update_count="$(repo_remote_update_count "$path")" || {
+  update_count="$(repo_remote_update_count "$path" "$compare_ref")" || {
     printf 'unknown\n'
     return
   }
@@ -662,7 +696,7 @@ sync_one() {
   }
 
   local update_count
-  update_count="$(repo_remote_update_count "$path")" || {
+  update_count="$(repo_remote_update_count "$path" "$upstream")" || {
     status FAIL "Cannot compare $branch with $upstream."
     return 20
   }

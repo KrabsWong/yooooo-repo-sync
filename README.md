@@ -75,7 +75,8 @@ If you really want to sync with local changes:
 ## Sync behavior
 
 - Default strategy is `rebase`.
-- `list` fetches repository metadata in parallel, then shows whether upstream has updates.
+- `list` fetches repository metadata in parallel, then shows whether the current branch has updates from its configured upstream, or from `origin/<current-branch>` when no upstream is configured.
+- `list` fetches branch refs only; it does not fetch tags, so tag conflicts do not block branch update checks.
 - In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
 - Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
 - `list --no-fetch` skips network fetches and checks local tracking refs only.
