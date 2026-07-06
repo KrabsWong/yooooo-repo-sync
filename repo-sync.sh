@@ -690,7 +690,7 @@ sync_one() {
 
   status INFO "branch=$branch, upstream=$upstream, strategy=$strategy"
 
-  git_logged "$path" fetch --prune --tags || {
+  git_logged "$path" fetch --prune --tags --force || {
     status FAIL "fetch failed for $name"
     return 20
   }
@@ -728,13 +728,13 @@ sync_one() {
 
   case "$strategy" in
     rebase)
-      git_logged "$path" pull --rebase --recurse-submodules=on-demand || {
+      git_logged "$path" pull --no-tags --rebase --recurse-submodules=on-demand || {
         status FAIL "pull failed for $name"
         return 20
       }
       ;;
     merge)
-      git_logged "$path" pull --no-rebase --recurse-submodules=on-demand || {
+      git_logged "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand || {
         status FAIL "pull failed for $name"
         return 20
       }
