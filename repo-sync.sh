@@ -245,6 +245,7 @@ list_submodules_color() {
 list_updates_color() {
   case "$1" in
     yes) printf '%s' "$C_GREEN" ;;
+    dirty) printf '%s' "$C_YELLOW" ;;
     no) printf '%s' "$C_DIM" ;;
     unknown) printf '%s' "$C_YELLOW" ;;
     pending) printf '%s' "$C_DIM" ;;
@@ -328,7 +329,7 @@ list_result_label() {
   local updates
   updates="$(sed -n '1p' "$result_file" 2>/dev/null)"
   case "$updates" in
-    yes|no|unknown) printf '%s\n' "$updates" ;;
+    yes|dirty|no|unknown) printf '%s\n' "$updates" ;;
     *) printf 'unknown\n' ;;
   esac
 }
@@ -640,6 +641,14 @@ repo_remote_update_count() {
   printf '%s\n' "$count"
 }
 
+repo_dirty_state() {
+  local repo_path="$1"
+  local dirty
+  dirty="$(git -C "$repo_path" status --porcelain=v1 --untracked-files=normal 2>/dev/null)" || return 2
+  [[ -n "$dirty" ]] && return 0
+  return 1
+}
+
 repo_update_label() {
   local path="$1"
   local refresh="${2:-false}"
@@ -659,6 +668,18 @@ repo_update_label() {
     printf 'unknown\n'
     return
   fi
+
+  repo_dirty_state "$path"
+  case $? in
+    0)
+      printf 'dirty\n'
+      return
+      ;;
+    2)
+      printf 'unknown\n'
+      return
+      ;;
+  esac
 
   local compare_ref
   compare_ref="$(repo_branch_compare_ref "$path" "$branch")" || {
@@ -680,9 +701,11 @@ repo_update_label() {
 
 SYNC_LAST_REASON=""
 SYNC_LAST_DIFFSTAT=""
+SYNC_LAST_DIRTY="false"
 SYNC_PLAN_BRANCH=""
 SYNC_PLAN_UPSTREAM=""
 SYNC_PLAN_UPDATE_COUNT=0
+SYNC_PLAN_DIRTY="false"
 
 sync_diffstat() {
   local path="$1"
@@ -709,6 +732,7 @@ sync_fetch_plan_one() {
   SYNC_PLAN_BRANCH=""
   SYNC_PLAN_UPSTREAM=""
   SYNC_PLAN_UPDATE_COUNT=0
+  SYNC_PLAN_DIRTY="false"
 
   printf '\n%b==>%b %bfetch/check%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
 
@@ -747,6 +771,19 @@ sync_fetch_plan_one() {
     return 20
   }
 
+  repo_dirty_state "$path"
+  case $? in
+    0)
+      SYNC_PLAN_DIRTY="true"
+      status INFO "working tree has local changes"
+      ;;
+    2)
+      SYNC_LAST_REASON="Cannot read git status."
+      status FAIL "$SYNC_LAST_REASON"
+      return 20
+      ;;
+  esac
+
   local update_count
   update_count="$(repo_remote_update_count "$path" "$upstream")" || {
     SYNC_LAST_REASON="Cannot compare $branch with $upstream."
@@ -782,6 +819,7 @@ sync_fetch_plan_worker() {
     printf 'branch\t%s\n' "$SYNC_PLAN_BRANCH"
     printf 'upstream\t%s\n' "$SYNC_PLAN_UPSTREAM"
     printf 'update_count\t%s\n' "$SYNC_PLAN_UPDATE_COUNT"
+    printf 'dirty\t%s\n' "$SYNC_PLAN_DIRTY"
   } > "$result_file"
 }
 
@@ -799,10 +837,12 @@ sync_update_one() {
   local branch="$5"
   local upstream="$6"
   local update_count="$7"
-  local allow_dirty="$8"
+  local planned_dirty="$8"
+  local allow_dirty="$9"
 
   SYNC_LAST_REASON=""
   SYNC_LAST_DIFFSTAT=""
+  SYNC_LAST_DIRTY="$planned_dirty"
 
   printf '\n%b==>%b %bupdate%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
   status INFO "branch=$branch, upstream=$upstream, strategy=$strategy, remote updates=$update_count"
@@ -816,16 +856,15 @@ sync_update_one() {
     return 20
   fi
 
-  if [[ -n "$dirty" && "$allow_dirty" != "true" ]]; then
-    SYNC_LAST_REASON="working tree has local changes."
-    status SKIP "$name: $SYNC_LAST_REASON"
+  if [[ -n "$dirty" ]]; then
+    SYNC_LAST_DIRTY="true"
+    status INFO "working tree has local changes; attempting update"
     echo "$dirty" | sed 's/^/       /' | head -n 20
     local dirty_count
     dirty_count="$(echo "$dirty" | wc -l | tr -d ' ')"
     if [[ "$dirty_count" -gt 20 ]]; then
       echo "       ... $((dirty_count - 20)) more lines"
     fi
-    return 10
   fi
 
   local before_ref
@@ -900,6 +939,19 @@ print_sync_section() {
   done
 }
 
+sync_item_detail() {
+  local dirty="$1"
+  local detail="${2:-}"
+
+  if [[ "$dirty" == "true" && -n "$detail" ]]; then
+    printf 'local dirty; %s\n' "$detail"
+  elif [[ "$dirty" == "true" ]]; then
+    printf 'local dirty\n'
+  else
+    printf '%s\n' "$detail"
+  fi
+}
+
 cmd_sync() {
   ensure_config
 
@@ -945,6 +997,7 @@ cmd_sync() {
   local update_branches=()
   local update_upstreams=()
   local update_counts=()
+  local update_dirty_values=()
   local ok_items=()
   local skipped_items=()
   local failed_items=()
@@ -1012,13 +1065,15 @@ cmd_sync() {
     wait "${fetch_pids[$index]}" >/dev/null 2>&1 || true
   done
 
-  local fetch_exit_code fetch_reason fetch_branch fetch_upstream fetch_update_count
+  local fetch_exit_code fetch_reason fetch_branch fetch_upstream fetch_update_count fetch_dirty
   for ((index = 0; index < ${#selected_names[@]}; index++)); do
     fetch_exit_code="$(sync_fetch_result_field "${fetch_result_files[$index]}" "exit_code")"
     fetch_reason="$(sync_fetch_result_field "${fetch_result_files[$index]}" "reason")"
     fetch_branch="$(sync_fetch_result_field "${fetch_result_files[$index]}" "branch")"
     fetch_upstream="$(sync_fetch_result_field "${fetch_result_files[$index]}" "upstream")"
     fetch_update_count="$(sync_fetch_result_field "${fetch_result_files[$index]}" "update_count")"
+    fetch_dirty="$(sync_fetch_result_field "${fetch_result_files[$index]}" "dirty")"
+    [[ "$fetch_dirty" == "true" ]] || fetch_dirty="false"
     if [[ -z "$fetch_exit_code" ]]; then
       fetch_exit_code=20
       fetch_reason="fetch/check worker did not write a result."
@@ -1033,14 +1088,15 @@ cmd_sync() {
         update_branches+=("$fetch_branch")
         update_upstreams+=("$fetch_upstream")
         update_counts+=("$fetch_update_count")
+        update_dirty_values+=("$fetch_dirty")
         ;;
       10)
         skipped=$((skipped + 1))
-        skipped_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t')
+        skipped_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t'"$(sync_item_detail "$fetch_dirty")")
         ;;
       *)
         failed=$((failed + 1))
-        failed_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t'"$fetch_reason")
+        failed_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t'"$(sync_item_detail "$fetch_dirty" "$fetch_reason")")
         ;;
     esac
   done
@@ -1048,19 +1104,19 @@ cmd_sync() {
 
   printf '\n%bPhase 2:%b serial updates (%s repos)\n' "$C_BOLD" "$C_RESET" "${#update_names[@]}"
   for ((index = 0; index < ${#update_names[@]}; index++)); do
-    sync_update_one "${update_names[$index]}" "${update_paths[$index]}" "${update_strategies[$index]}" "${update_submodules[$index]}" "${update_branches[$index]}" "${update_upstreams[$index]}" "${update_counts[$index]}" "$allow_dirty"
+    sync_update_one "${update_names[$index]}" "${update_paths[$index]}" "${update_strategies[$index]}" "${update_submodules[$index]}" "${update_branches[$index]}" "${update_upstreams[$index]}" "${update_counts[$index]}" "${update_dirty_values[$index]}" "$allow_dirty"
     case $? in
       0)
         ok=$((ok + 1))
-        ok_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$SYNC_LAST_DIFFSTAT")
+        ok_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$(sync_item_detail "$SYNC_LAST_DIRTY" "$SYNC_LAST_DIFFSTAT")")
         ;;
       10)
         skipped=$((skipped + 1))
-        skipped_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t')
+        skipped_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$(sync_item_detail "$SYNC_LAST_DIRTY")")
         ;;
       *)
         failed=$((failed + 1))
-        failed_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$SYNC_LAST_REASON")
+        failed_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$(sync_item_detail "$SYNC_LAST_DIRTY" "$SYNC_LAST_REASON")")
         ;;
     esac
   done

@@ -60,22 +60,22 @@ ln -s /absolute/path/to/repo-sync.sh /usr/local/bin/repo-sync
 ./repo-sync.sh sync --strategy merge
 ```
 
-By default, dirty working trees are skipped and printed:
+Dirty working trees are marked in `list` and in the final `sync` result:
 
 ```bash
+./repo-sync.sh list
 ./repo-sync.sh sync
 ```
 
-If you really want to sync with local changes:
+`sync` still attempts the update when local changes are present. If Git cannot update that repository cleanly, it appears in `Failed` with the local-dirty marker and the Git error.
 
-```bash
-./repo-sync.sh sync --allow-dirty
-```
+`--allow-dirty` is still accepted for compatibility.
 
 ## Sync behavior
 
 - Default strategy is `rebase`.
 - `list` fetches repository metadata in parallel, then shows whether the current branch has updates from its configured upstream, or from `origin/<current-branch>` when no upstream is configured.
+- `list` shows `dirty` when a repository has staged, unstaged, or untracked local changes.
 - `list` fetches branch refs only; it does not fetch tags, so tag conflicts do not block branch update checks.
 - In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
 - Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
@@ -83,7 +83,7 @@ If you really want to sync with local changes:
 - `sync` first fetches branches and tags for every selected repository in parallel, forcing local tags to match remote tags when names collide.
 - During the fetch pass, `sync` shows compact progress instead of full fetch output.
 - After the fetch pass, `sync` immediately skips repositories with no remote updates, then serially updates only repositories that do have updates.
-- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, and failed items include error reasons.
+- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, failed items include error reasons, and dirty repositories are marked with `local dirty`.
 - `rebase` runs `git pull --no-tags --rebase --recurse-submodules=on-demand`.
 - `merge` runs `git pull --no-tags --no-rebase --recurse-submodules=on-demand`.
 - Repositories registered with `--submodules` also run:
