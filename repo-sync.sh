@@ -572,11 +572,33 @@ cmd_set() {
   echo "Updated: $new_name -> $new_path ($new_strategy, submodules=$new_submodules)"
 }
 
-git_logged() {
+SYNC_LAST_COMMAND_OUTPUT=""
+
+git_logged_capture() {
   local repo_path="$1"
   shift
   printf '%b$%b git -C %s %s\n' "$C_DIM" "$C_RESET" "$repo_path" "$*"
-  git -C "$repo_path" "$@"
+  SYNC_LAST_COMMAND_OUTPUT="$(git -C "$repo_path" "$@" 2>&1)"
+  local exit_code=$?
+  if [[ -n "$SYNC_LAST_COMMAND_OUTPUT" ]]; then
+    printf '%s\n' "$SYNC_LAST_COMMAND_OUTPUT"
+  fi
+  return "$exit_code"
+}
+
+command_output_summary() {
+  printf '%s\n' "$1" | sed -n '1,3p' | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/[[:space:]]*$//'
+}
+
+sync_failure_reason() {
+  local message="$1"
+  local detail
+  detail="$(command_output_summary "$SYNC_LAST_COMMAND_OUTPUT")"
+  if [[ -n "$detail" ]]; then
+    printf '%s: %s\n' "$message" "$detail"
+  else
+    printf '%s\n' "$message"
+  fi
 }
 
 git_fetch_quiet() {
@@ -656,67 +678,147 @@ repo_update_label() {
   fi
 }
 
-sync_one() {
+SYNC_LAST_REASON=""
+SYNC_LAST_DIFFSTAT=""
+SYNC_PLAN_BRANCH=""
+SYNC_PLAN_UPSTREAM=""
+SYNC_PLAN_UPDATE_COUNT=0
+
+sync_diffstat() {
+  local path="$1"
+  local before_ref="$2"
+  local stat
+  stat="$(git -C "$path" diff --shortstat "$before_ref" HEAD 2>/dev/null)" || {
+    printf 'diffstat unavailable\n'
+    return
+  }
+  stat="$(printf '%s' "$stat" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [[ -n "$stat" ]]; then
+    printf '%s\n' "$stat"
+  else
+    printf '0 files changed\n'
+  fi
+}
+
+sync_fetch_plan_one() {
   local name="$1"
   local path="$2"
   local strategy="$3"
-  local submodules="$4"
-  local allow_dirty="$5"
 
-  printf '\n%b==>%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
+  SYNC_LAST_REASON=""
+  SYNC_PLAN_BRANCH=""
+  SYNC_PLAN_UPSTREAM=""
+  SYNC_PLAN_UPDATE_COUNT=0
+
+  printf '\n%b==>%b %bfetch/check%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
 
   if [[ ! -d "$path" ]]; then
-    status SKIP "Path does not exist: $path"
+    SYNC_LAST_REASON="Path does not exist: $path"
+    status SKIP "$SYNC_LAST_REASON"
     return 10
   fi
   if ! is_git_repo "$path"; then
-    status SKIP "Not a git repository: $path"
+    SYNC_LAST_REASON="Not a git repository: $path"
+    status SKIP "$SYNC_LAST_REASON"
     return 10
   fi
 
   local branch
   branch="$(git -C "$path" branch --show-current 2>/dev/null)"
   if [[ -z "$branch" ]]; then
-    status SKIP "Detached HEAD or no current branch."
+    SYNC_LAST_REASON="Detached HEAD or no current branch."
+    status SKIP "$SYNC_LAST_REASON"
     return 10
   fi
 
   local upstream
   upstream="$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
   if [[ -z "$upstream" ]]; then
-    status SKIP "Branch has no upstream: $branch"
+    SYNC_LAST_REASON="Branch has no upstream: $branch"
+    status SKIP "$SYNC_LAST_REASON"
     return 10
   fi
 
   status INFO "branch=$branch, upstream=$upstream, strategy=$strategy"
 
-  git_logged "$path" fetch --prune --tags --force || {
-    status FAIL "fetch failed for $name"
+  git_logged_capture "$path" fetch --prune --tags --force || {
+    SYNC_LAST_REASON="$(sync_failure_reason "fetch failed")"
+    status FAIL "$name: $SYNC_LAST_REASON"
     return 20
   }
 
   local update_count
   update_count="$(repo_remote_update_count "$path" "$upstream")" || {
-    status FAIL "Cannot compare $branch with $upstream."
+    SYNC_LAST_REASON="Cannot compare $branch with $upstream."
+    status FAIL "$SYNC_LAST_REASON"
     return 20
   }
   if [[ "$update_count" -eq 0 ]]; then
-    status SKIP "$name: no updates; already up to date with $upstream."
+    SYNC_LAST_REASON="no updates; already up to date with $upstream."
+    status SKIP "$name: $SYNC_LAST_REASON"
     return 10
   fi
 
   status INFO "remote updates=$update_count"
+  SYNC_PLAN_BRANCH="$branch"
+  SYNC_PLAN_UPSTREAM="$upstream"
+  SYNC_PLAN_UPDATE_COUNT="$update_count"
+  return 0
+}
+
+sync_fetch_plan_worker() {
+  local name="$1"
+  local path="$2"
+  local strategy="$3"
+  local result_file="$4"
+  local log_file="$5"
+
+  sync_fetch_plan_one "$name" "$path" "$strategy" > "$log_file" 2>&1
+  local exit_code=$?
+
+  {
+    printf 'exit_code\t%s\n' "$exit_code"
+    printf 'reason\t%s\n' "$SYNC_LAST_REASON"
+    printf 'branch\t%s\n' "$SYNC_PLAN_BRANCH"
+    printf 'upstream\t%s\n' "$SYNC_PLAN_UPSTREAM"
+    printf 'update_count\t%s\n' "$SYNC_PLAN_UPDATE_COUNT"
+  } > "$result_file"
+}
+
+sync_fetch_result_field() {
+  local result_file="$1"
+  local field="$2"
+  sed -n "s/^${field}	//p" "$result_file" 2>/dev/null | sed -n '1p'
+}
+
+sync_update_one() {
+  local name="$1"
+  local path="$2"
+  local strategy="$3"
+  local submodules="$4"
+  local branch="$5"
+  local upstream="$6"
+  local update_count="$7"
+  local allow_dirty="$8"
+
+  SYNC_LAST_REASON=""
+  SYNC_LAST_DIFFSTAT=""
+
+  printf '\n%b==>%b %bupdate%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
+  status INFO "branch=$branch, upstream=$upstream, strategy=$strategy, remote updates=$update_count"
 
   local dirty
   dirty="$(git -C "$path" status --porcelain=v1 --untracked-files=normal 2>&1)"
   if [[ $? -ne 0 ]]; then
+    SYNC_LAST_REASON="Cannot read git status: $(command_output_summary "$dirty")"
     status FAIL "Cannot read git status:"
     echo "$dirty"
     return 20
   fi
 
   if [[ -n "$dirty" && "$allow_dirty" != "true" ]]; then
-    status SKIP "$name: working tree has local changes."
+    SYNC_LAST_REASON="working tree has local changes."
+    status SKIP "$name: $SYNC_LAST_REASON"
     echo "$dirty" | sed 's/^/       /' | head -n 20
     local dirty_count
     dirty_count="$(echo "$dirty" | wc -l | tr -d ' ')"
@@ -726,38 +828,76 @@ sync_one() {
     return 10
   fi
 
+  local before_ref
+  before_ref="$(git -C "$path" rev-parse HEAD 2>/dev/null)" || {
+    SYNC_LAST_REASON="Cannot read current HEAD."
+    status FAIL "$SYNC_LAST_REASON"
+    return 20
+  }
+
   case "$strategy" in
     rebase)
-      git_logged "$path" pull --no-tags --rebase --recurse-submodules=on-demand || {
-        status FAIL "pull failed for $name"
+      git_logged_capture "$path" pull --no-tags --rebase --recurse-submodules=on-demand || {
+        SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+        status FAIL "$name: $SYNC_LAST_REASON"
         return 20
       }
       ;;
     merge)
-      git_logged "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand || {
-        status FAIL "pull failed for $name"
+      git_logged_capture "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand || {
+        SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+        status FAIL "$name: $SYNC_LAST_REASON"
         return 20
       }
       ;;
     *)
-      status FAIL "Unknown strategy: $strategy"
+      SYNC_LAST_REASON="Unknown strategy: $strategy"
+      status FAIL "$SYNC_LAST_REASON"
       return 20
       ;;
   esac
 
   if [[ "$submodules" == "true" ]]; then
-    git_logged "$path" submodule sync --recursive || {
-      status FAIL "submodule sync failed for $name"
+    git_logged_capture "$path" submodule sync --recursive || {
+      SYNC_LAST_REASON="$(sync_failure_reason "submodule sync failed")"
+      status FAIL "$name: $SYNC_LAST_REASON"
       return 20
     }
-    git_logged "$path" submodule update --init --recursive || {
-      status FAIL "submodule update failed for $name"
+    git_logged_capture "$path" submodule update --init --recursive || {
+      SYNC_LAST_REASON="$(sync_failure_reason "submodule update failed")"
+      status FAIL "$name: $SYNC_LAST_REASON"
       return 20
     }
   fi
 
-  status OK "$name"
+  SYNC_LAST_DIFFSTAT="$(sync_diffstat "$path" "$before_ref")"
+  status OK "$name: $SYNC_LAST_DIFFSTAT"
   return 0
+}
+
+print_sync_section() {
+  local title="$1"
+  local count="$2"
+  local color="$3"
+  shift
+  shift
+  shift
+
+  printf '%b%s (%s):%b\n' "$color" "$title" "$count" "$C_RESET"
+  if [[ $# -eq 0 ]]; then
+    printf '  - %bnone%b\n' "$C_DIM" "$C_RESET"
+    return
+  fi
+
+  local item name path detail
+  for item in "$@"; do
+    IFS=$'\t' read -r name path detail <<< "$item"
+    printf '  - %s: %b%s%b' "$name" "$C_DIM" "$path" "$C_RESET"
+    if [[ -n "${detail:-}" ]]; then
+      printf ' | %s' "$detail"
+    fi
+    printf '\n'
+  done
 }
 
 cmd_sync() {
@@ -794,6 +934,23 @@ cmd_sync() {
   local ok=0
   local skipped=0
   local failed=0
+  local selected_names=()
+  local selected_paths=()
+  local selected_strategies=()
+  local selected_submodules=()
+  local update_names=()
+  local update_paths=()
+  local update_strategies=()
+  local update_submodules=()
+  local update_branches=()
+  local update_upstreams=()
+  local update_counts=()
+  local ok_items=()
+  local skipped_items=()
+  local failed_items=()
+  local fetch_result_files=()
+  local fetch_log_files=()
+  local fetch_pids=()
 
   if [[ ${#targets[@]} -gt 0 ]]; then
     local target line
@@ -802,32 +959,128 @@ cmd_sync() {
       local name path strategy submodules
       IFS=$'\t' read -r name path strategy submodules <<< "$line"
       [[ -n "$override_strategy" ]] && strategy="$override_strategy"
-      sync_one "$name" "$path" "$strategy" "$submodules" "$allow_dirty"
-      case $? in
-        0) ok=$((ok + 1)) ;;
-        10) skipped=$((skipped + 1)) ;;
-        *) failed=$((failed + 1)) ;;
-      esac
+      selected_names+=("$name")
+      selected_paths+=("$path")
+      selected_strategies+=("$strategy")
+      selected_submodules+=("$submodules")
     done
   else
     local name path strategy submodules
     while IFS=$'\t' read -r name path strategy submodules; do
       [[ -z "${name:-}" ]] && continue
       [[ -n "$override_strategy" ]] && strategy="$override_strategy"
-      sync_one "$name" "$path" "$strategy" "$submodules" "$allow_dirty"
-      case $? in
-        0) ok=$((ok + 1)) ;;
-        10) skipped=$((skipped + 1)) ;;
-        *) failed=$((failed + 1)) ;;
-      esac
+      selected_names+=("$name")
+      selected_paths+=("$path")
+      selected_strategies+=("$strategy")
+      selected_submodules+=("$submodules")
     done < "$CONFIG_FILE"
   fi
 
+  local index
+  local sync_tmp_dir
+  sync_tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync.XXXXXX")" || die "cannot create temp dir"
+
+  printf '%bPhase 1:%b fetch and check updates (%s repos in parallel)\n' "$C_BOLD" "$C_RESET" "${#selected_names[@]}"
+  for ((index = 0; index < ${#selected_names[@]}; index++)); do
+    fetch_result_files+=("$sync_tmp_dir/$index.result")
+    fetch_log_files+=("$sync_tmp_dir/$index.log")
+    sync_fetch_plan_worker "${selected_names[$index]}" "${selected_paths[$index]}" "${selected_strategies[$index]}" "${fetch_result_files[$index]}" "${fetch_log_files[$index]}" &
+    fetch_pids+=("$!")
+  done
+
+  local fetch_total="${#fetch_pids[@]}"
+  local fetch_done=0
+  local frame_index=0
+  if can_live_update_list; then
+    while [[ "$fetch_done" -lt "$fetch_total" ]]; do
+      fetch_done=0
+      for ((index = 0; index < fetch_total; index++)); do
+        [[ -s "${fetch_result_files[$index]}" ]] && fetch_done=$((fetch_done + 1))
+      done
+      printf '\r%b%s%b (%s/%s)' "$C_BLUE" "$(list_spinner_label "$frame_index")" "$C_RESET" "$fetch_done" "$fetch_total"
+      if [[ "$fetch_done" -lt "$fetch_total" ]]; then
+        sleep 0.08
+        frame_index=$((frame_index + 1))
+      fi
+    done
+    printf '\r%*s\r' 40 ''
+  elif [[ "$fetch_total" -gt 0 ]]; then
+    printf 'Fetching %s repositories...\n' "$fetch_total"
+  fi
+
+  for ((index = 0; index < ${#fetch_pids[@]}; index++)); do
+    wait "${fetch_pids[$index]}" >/dev/null 2>&1 || true
+  done
+
+  local fetch_exit_code fetch_reason fetch_branch fetch_upstream fetch_update_count
+  for ((index = 0; index < ${#selected_names[@]}; index++)); do
+    fetch_exit_code="$(sync_fetch_result_field "${fetch_result_files[$index]}" "exit_code")"
+    fetch_reason="$(sync_fetch_result_field "${fetch_result_files[$index]}" "reason")"
+    fetch_branch="$(sync_fetch_result_field "${fetch_result_files[$index]}" "branch")"
+    fetch_upstream="$(sync_fetch_result_field "${fetch_result_files[$index]}" "upstream")"
+    fetch_update_count="$(sync_fetch_result_field "${fetch_result_files[$index]}" "update_count")"
+    if [[ -z "$fetch_exit_code" ]]; then
+      fetch_exit_code=20
+      fetch_reason="fetch/check worker did not write a result."
+    fi
+
+    case "$fetch_exit_code" in
+      0)
+        update_names+=("${selected_names[$index]}")
+        update_paths+=("${selected_paths[$index]}")
+        update_strategies+=("${selected_strategies[$index]}")
+        update_submodules+=("${selected_submodules[$index]}")
+        update_branches+=("$fetch_branch")
+        update_upstreams+=("$fetch_upstream")
+        update_counts+=("$fetch_update_count")
+        ;;
+      10)
+        skipped=$((skipped + 1))
+        skipped_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t')
+        ;;
+      *)
+        failed=$((failed + 1))
+        failed_items+=("${selected_names[$index]}"$'\t'"${selected_paths[$index]}"$'\t'"$fetch_reason")
+        ;;
+    esac
+  done
+  rm -rf "$sync_tmp_dir"
+
+  printf '\n%bPhase 2:%b serial updates (%s repos)\n' "$C_BOLD" "$C_RESET" "${#update_names[@]}"
+  for ((index = 0; index < ${#update_names[@]}; index++)); do
+    sync_update_one "${update_names[$index]}" "${update_paths[$index]}" "${update_strategies[$index]}" "${update_submodules[$index]}" "${update_branches[$index]}" "${update_upstreams[$index]}" "${update_counts[$index]}" "$allow_dirty"
+    case $? in
+      0)
+        ok=$((ok + 1))
+        ok_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$SYNC_LAST_DIFFSTAT")
+        ;;
+      10)
+        skipped=$((skipped + 1))
+        skipped_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t')
+        ;;
+      *)
+        failed=$((failed + 1))
+        failed_items+=("${update_names[$index]}"$'\t'"${update_paths[$index]}"$'\t'"$SYNC_LAST_REASON")
+        ;;
+    esac
+  done
+
   echo ""
-  printf 'Summary: %bok=%s%b, %bskipped=%s%b, %bfailed=%s%b\n' \
-    "$C_GREEN" "$ok" "$C_RESET" \
-    "$C_YELLOW" "$skipped" "$C_RESET" \
-    "$C_RED" "$failed" "$C_RESET"
+  if [[ ${#ok_items[@]} -gt 0 ]]; then
+    print_sync_section "Updated" "$ok" "$C_GREEN" "${ok_items[@]}"
+  else
+    print_sync_section "Updated" "$ok" "$C_GREEN"
+  fi
+  if [[ ${#skipped_items[@]} -gt 0 ]]; then
+    print_sync_section "Skipped" "$skipped" "$C_YELLOW" "${skipped_items[@]}"
+  else
+    print_sync_section "Skipped" "$skipped" "$C_YELLOW"
+  fi
+  if [[ ${#failed_items[@]} -gt 0 ]]; then
+    print_sync_section "Failed" "$failed" "$C_RED" "${failed_items[@]}"
+  else
+    print_sync_section "Failed" "$failed" "$C_RED"
+  fi
   [[ "$failed" -eq 0 ]]
 }
 

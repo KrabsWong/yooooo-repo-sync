@@ -80,7 +80,10 @@ If you really want to sync with local changes:
 - In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
 - Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
 - `list --no-fetch` skips network fetches and checks local tracking refs only.
-- `sync` fetches branches and tags serially, forcing local tags to match remote tags when names collide, then skips repositories that are already up to date.
+- `sync` first fetches branches and tags for every selected repository in parallel, forcing local tags to match remote tags when names collide.
+- During the fetch pass, `sync` shows compact progress instead of full fetch output.
+- After the fetch pass, `sync` immediately skips repositories with no remote updates, then serially updates only repositories that do have updates.
+- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, and failed items include error reasons.
 - `rebase` runs `git pull --no-tags --rebase --recurse-submodules=on-demand`.
 - `merge` runs `git pull --no-tags --no-rebase --recurse-submodules=on-demand`.
 - Repositories registered with `--submodules` also run:
