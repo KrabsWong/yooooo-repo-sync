@@ -755,6 +755,19 @@ sync_fetch_plan_one() {
     return 10
   fi
 
+  repo_dirty_state "$path"
+  case $? in
+    0)
+      SYNC_PLAN_DIRTY="true"
+      status INFO "working tree has local changes"
+      ;;
+    2)
+      SYNC_LAST_REASON="Cannot read git status."
+      status FAIL "$SYNC_LAST_REASON"
+      return 20
+      ;;
+  esac
+
   local upstream
   upstream="$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
   if [[ -z "$upstream" ]]; then
@@ -770,19 +783,6 @@ sync_fetch_plan_one() {
     status FAIL "$name: $SYNC_LAST_REASON"
     return 20
   }
-
-  repo_dirty_state "$path"
-  case $? in
-    0)
-      SYNC_PLAN_DIRTY="true"
-      status INFO "working tree has local changes"
-      ;;
-    2)
-      SYNC_LAST_REASON="Cannot read git status."
-      status FAIL "$SYNC_LAST_REASON"
-      return 20
-      ;;
-  esac
 
   local update_count
   update_count="$(repo_remote_update_count "$path" "$upstream")" || {
@@ -924,16 +924,18 @@ print_sync_section() {
 
   printf '%b%s (%s):%b\n' "$color" "$title" "$count" "$C_RESET"
   if [[ $# -eq 0 ]]; then
-    printf '  - %bnone%b\n' "$C_DIM" "$C_RESET"
+    printf '  %bnone%b\n' "$C_DIM" "$C_RESET"
     return
   fi
 
   local item name path detail
   for item in "$@"; do
     IFS=$'\t' read -r name path detail <<< "$item"
-    printf '  - %s: %b%s%b' "$name" "$C_DIM" "$path" "$C_RESET"
+    printf '  '
+    print_colored_field "$LIST_NAME_WIDTH" "$name" "$C_BOLD"
+    printf '  %b%s%b' "$C_DIM" "$path" "$C_RESET"
     if [[ -n "${detail:-}" ]]; then
-      printf ' | %s' "$detail"
+      printf '  | %s' "$detail"
     fi
     printf '\n'
   done
