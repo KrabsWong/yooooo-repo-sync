@@ -4,13 +4,11 @@ Shell helper for batch-syncing local Git repositories.
 
 ## Check list
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/6f88ff28-032e-4a3a-9bce-8045d52e2ab8" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/d1889b12-8b75-4359-9608-c0e4aa9588d5" />
 
 ## Sync result
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/87437415-f3d0-4c22-bc65-28855bdb8af4" />
-
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/7e620dc5-bf8d-4830-b0ee-3b909f6695a6" />
+<img width="800" height="677" alt="image" src="https://github.com/user-attachments/assets/825539ef-b96f-453f-8ef4-ad65d22066f7" />
 
 ## Config is stored beside the script:
 
