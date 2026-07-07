@@ -2,6 +2,8 @@
 set -u
 
 DEFAULT_STRATEGY="rebase"
+DEFAULT_FETCH_JOBS=4
+DEFAULT_FETCH_ATTEMPTS=2
 LIST_NAME_WIDTH=24
 LIST_STRATEGY_WIDTH=8
 LIST_SUBMODULES_WIDTH=10
@@ -64,6 +66,22 @@ status() {
   esac
 
   printf '%b[%s]%b %s\n' "$color" "$level" "$C_RESET" "$*"
+}
+
+repo_sync_job_count() {
+  local value="${REPO_SYNC_JOBS:-$DEFAULT_FETCH_JOBS}"
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    die "REPO_SYNC_JOBS must be a positive integer"
+  fi
+  printf '%s\n' "$value"
+}
+
+repo_sync_fetch_attempts() {
+  local value="${REPO_SYNC_FETCH_ATTEMPTS:-$DEFAULT_FETCH_ATTEMPTS}"
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    die "REPO_SYNC_FETCH_ATTEMPTS must be a positive integer"
+  fi
+  printf '%s\n' "$value"
 }
 
 ensure_config() {
@@ -279,6 +297,21 @@ can_live_update_list() {
   [[ -t 1 && "${TERM:-}" != "dumb" ]]
 }
 
+TERMINAL_CURSOR_HIDDEN="false"
+
+hide_terminal_cursor() {
+  can_live_update_list || return
+  printf '\033[?25l'
+  TERMINAL_CURSOR_HIDDEN="true"
+  trap show_terminal_cursor EXIT
+}
+
+show_terminal_cursor() {
+  [[ "${TERMINAL_CURSOR_HIDDEN:-false}" == "true" ]] || return
+  printf '\033[?25h'
+  TERMINAL_CURSOR_HIDDEN="false"
+}
+
 update_list_updates_field() {
   local row_index="$1"
   local row_count="$2"
@@ -363,24 +396,46 @@ cmd_list_live_fetch() {
   for ((index = 0; index < row_count; index++)); do
     print_list_row "${names[$index]}" "${strategies[$index]}" "${submodules_values[$index]}" "pending" "${paths[$index]}"
     result_files+=("$tmp_dir/$index.status")
+    pids+=("")
     done_flags+=("false")
-    list_update_worker "${paths[$index]}" "true" "${result_files[$index]}" &
-    pids+=("$!")
+  done
+
+  local job_count
+  job_count="$(repo_sync_job_count)"
+  local running=0
+  local next_index=0
+  while [[ "$next_index" -lt "$row_count" && "$running" -lt "$job_count" ]]; do
+    list_update_worker "${paths[$next_index]}" "true" "${result_files[$next_index]}" &
+    pids[$next_index]="$!"
+    next_index=$((next_index + 1))
+    running=$((running + 1))
   done
 
   local remaining="$row_count"
   local frame_index=0
   local updates
+  hide_terminal_cursor
   while [[ "$remaining" -gt 0 ]]; do
     for ((index = 0; index < row_count; index++)); do
       [[ "${done_flags[$index]}" == "true" ]] && continue
 
       if [[ -s "${result_files[$index]}" ]]; then
+        if [[ -n "${pids[$index]:-}" ]]; then
+          wait "${pids[$index]}" >/dev/null 2>&1 || true
+          pids[$index]=""
+        fi
         updates="$(list_result_label "${result_files[$index]}")"
         update_list_updates_field "$((index + 1))" "$row_count" "$updates"
         done_flags[$index]="true"
         remaining=$((remaining - 1))
-      else
+        running=$((running - 1))
+        while [[ "$next_index" -lt "$row_count" && "$running" -lt "$job_count" ]]; do
+          list_update_worker "${paths[$next_index]}" "true" "${result_files[$next_index]}" &
+          pids[$next_index]="$!"
+          next_index=$((next_index + 1))
+          running=$((running + 1))
+        done
+      elif [[ -n "${pids[$index]:-}" ]]; then
         update_list_updates_field "$((index + 1))" "$row_count" "$(list_spinner_label "$frame_index")"
       fi
     done
@@ -390,9 +445,12 @@ cmd_list_live_fetch() {
       frame_index=$((frame_index + 1))
     fi
   done
+  show_terminal_cursor
 
   for ((index = 0; index < row_count; index++)); do
-    wait "${pids[$index]}" >/dev/null 2>&1 || true
+    if [[ -n "${pids[$index]:-}" ]]; then
+      wait "${pids[$index]}" >/dev/null 2>&1 || true
+    fi
   done
   rm -rf "$tmp_dir"
 }
@@ -405,6 +463,7 @@ cmd_list_parallel_plain() {
   local submodules_values=()
   local result_files=()
   local pids=()
+  local done_flags=()
 
   local name path strategy submodules
   while IFS=$'\t' read -r name path strategy submodules; do
@@ -422,12 +481,40 @@ cmd_list_parallel_plain() {
   local index
   for ((index = 0; index < row_count; index++)); do
     result_files+=("$tmp_dir/$index.status")
-    list_update_worker "${paths[$index]}" "$refresh" "${result_files[$index]}" &
-    pids+=("$!")
+    pids+=("")
+    done_flags+=("false")
   done
 
-  for ((index = 0; index < row_count; index++)); do
-    wait "${pids[$index]}" >/dev/null 2>&1 || true
+  local job_count
+  job_count="$(repo_sync_job_count)"
+  local running=0
+  local remaining="$row_count"
+  local next_index=0
+  while [[ "$remaining" -gt 0 ]]; do
+    while [[ "$next_index" -lt "$row_count" && "$running" -lt "$job_count" ]]; do
+      list_update_worker "${paths[$next_index]}" "$refresh" "${result_files[$next_index]}" &
+      pids[$next_index]="$!"
+      next_index=$((next_index + 1))
+      running=$((running + 1))
+    done
+
+    local made_progress="false"
+    for ((index = 0; index < row_count; index++)); do
+      [[ "${done_flags[$index]}" == "true" ]] && continue
+      [[ -n "${pids[$index]:-}" ]] || continue
+      if [[ -s "${result_files[$index]}" ]]; then
+        wait "${pids[$index]}" >/dev/null 2>&1 || true
+        pids[$index]=""
+        done_flags[$index]="true"
+        running=$((running - 1))
+        remaining=$((remaining - 1))
+        made_progress="true"
+      fi
+    done
+
+    if [[ "$remaining" -gt 0 && "$made_progress" == "false" ]]; then
+      sleep 0.05
+    fi
   done
 
   echo "Config: $CONFIG_FILE"
@@ -444,6 +531,8 @@ cmd_list_parallel_plain() {
 
 cmd_list() {
   ensure_config
+  repo_sync_job_count >/dev/null
+  repo_sync_fetch_attempts >/dev/null
 
   local refresh="true"
   while [[ $# -gt 0 ]]; do
@@ -603,11 +692,57 @@ sync_failure_reason() {
 }
 
 git_fetch_quiet() {
-  git -C "$1" fetch --quiet --prune >/dev/null 2>&1
+  local repo_path="$1"
+  local attempts
+  attempts="$(repo_sync_fetch_attempts)"
+  local attempt
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if git -C "$repo_path" fetch --quiet --prune >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$attempt" -lt "$attempts" ]]; then
+      sleep "$attempt"
+    fi
+  done
+  return 1
+}
+
+git_logged_fetch_with_retry() {
+  local repo_path="$1"
+  local attempts
+  attempts="$(repo_sync_fetch_attempts)"
+  local attempt
+  local exit_code=1
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if [[ "$attempt" -eq 1 ]]; then
+      printf '%b$%b git -C %s fetch --prune --tags --force\n' "$C_DIM" "$C_RESET" "$repo_path"
+    else
+      printf '%b$%b git -C %s fetch --prune --tags --force  # retry %s/%s\n' "$C_DIM" "$C_RESET" "$repo_path" "$attempt" "$attempts"
+    fi
+
+    SYNC_LAST_COMMAND_OUTPUT="$(git -C "$repo_path" fetch --prune --tags --force 2>&1)"
+    exit_code=$?
+    if [[ -n "$SYNC_LAST_COMMAND_OUTPUT" ]]; then
+      printf '%s\n' "$SYNC_LAST_COMMAND_OUTPUT"
+    fi
+    if [[ "$exit_code" -eq 0 ]]; then
+      return 0
+    fi
+    if [[ "$attempt" -lt "$attempts" ]]; then
+      sleep "$attempt"
+    fi
+  done
+
+  return "$exit_code"
 }
 
 repo_upstream() {
   git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null
+}
+
+repo_has_remotes() {
+  [[ -n "$(git -C "$1" remote 2>/dev/null)" ]]
 }
 
 repo_current_branch() {
@@ -652,6 +787,7 @@ repo_dirty_state() {
 repo_update_label() {
   local path="$1"
   local refresh="${2:-false}"
+  local fetch_ok="true"
   if [[ ! -d "$path" ]] || ! is_git_repo "$path"; then
     printf 'unknown\n'
     return
@@ -664,9 +800,8 @@ repo_update_label() {
     return
   fi
 
-  if [[ "$refresh" == "true" ]] && ! git_fetch_quiet "$path"; then
-    printf 'unknown\n'
-    return
+  if [[ "$refresh" == "true" ]] && repo_has_remotes "$path" && ! git_fetch_quiet "$path"; then
+    fetch_ok="false"
   fi
 
   repo_dirty_state "$path"
@@ -683,7 +818,11 @@ repo_update_label() {
 
   local compare_ref
   compare_ref="$(repo_branch_compare_ref "$path" "$branch")" || {
-    printf 'unknown\n'
+    if [[ "$fetch_ok" == "true" ]]; then
+      printf 'no\n'
+    else
+      printf 'unknown\n'
+    fi
     return
   }
 
@@ -738,21 +877,21 @@ sync_fetch_plan_one() {
 
   if [[ ! -d "$path" ]]; then
     SYNC_LAST_REASON="Path does not exist: $path"
-    status SKIP "$SYNC_LAST_REASON"
-    return 10
+    status FAIL "$SYNC_LAST_REASON"
+    return 20
   fi
   if ! is_git_repo "$path"; then
     SYNC_LAST_REASON="Not a git repository: $path"
-    status SKIP "$SYNC_LAST_REASON"
-    return 10
+    status FAIL "$SYNC_LAST_REASON"
+    return 20
   fi
 
   local branch
   branch="$(git -C "$path" branch --show-current 2>/dev/null)"
   if [[ -z "$branch" ]]; then
     SYNC_LAST_REASON="Detached HEAD or no current branch."
-    status SKIP "$SYNC_LAST_REASON"
-    return 10
+    status FAIL "$SYNC_LAST_REASON"
+    return 20
   fi
 
   repo_dirty_state "$path"
@@ -768,21 +907,21 @@ sync_fetch_plan_one() {
       ;;
   esac
 
-  local upstream
-  upstream="$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
-  if [[ -z "$upstream" ]]; then
-    SYNC_LAST_REASON="Branch has no upstream: $branch"
-    status SKIP "$SYNC_LAST_REASON"
-    return 10
-  fi
+  status INFO "branch=$branch, strategy=$strategy"
 
-  status INFO "branch=$branch, upstream=$upstream, strategy=$strategy"
-
-  git_logged_capture "$path" fetch --prune --tags --force || {
+  git_logged_fetch_with_retry "$path" || {
     SYNC_LAST_REASON="$(sync_failure_reason "fetch failed")"
     status FAIL "$name: $SYNC_LAST_REASON"
     return 20
   }
+
+  local upstream
+  upstream="$(repo_branch_compare_ref "$path" "$branch")" || {
+    SYNC_LAST_REASON="No upstream or origin/$branch for current branch."
+    status FAIL "$SYNC_LAST_REASON"
+    return 20
+  }
+  status INFO "compare=$upstream"
 
   local update_count
   update_count="$(repo_remote_update_count "$path" "$upstream")" || {
@@ -791,8 +930,8 @@ sync_fetch_plan_one() {
     return 20
   }
   if [[ "$update_count" -eq 0 ]]; then
-    SYNC_LAST_REASON="no updates; already up to date with $upstream."
-    status SKIP "$name: $SYNC_LAST_REASON"
+    SYNC_LAST_REASON="no updates"
+    status SKIP "$name: no updates"
     return 10
   fi
 
@@ -845,7 +984,7 @@ sync_update_one() {
   SYNC_LAST_DIRTY="$planned_dirty"
 
   printf '\n%b==>%b %bupdate%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
-  status INFO "branch=$branch, upstream=$upstream, strategy=$strategy, remote updates=$update_count"
+  status INFO "branch=$branch, compare=$upstream, strategy=$strategy, remote updates=$update_count"
 
   local dirty
   dirty="$(git -C "$path" status --porcelain=v1 --untracked-files=normal 2>&1)"
@@ -876,18 +1015,34 @@ sync_update_one() {
 
   case "$strategy" in
     rebase)
-      git_logged_capture "$path" pull --no-tags --rebase --recurse-submodules=on-demand || {
-        SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
-        status FAIL "$name: $SYNC_LAST_REASON"
-        return 20
-      }
+      if [[ -n "$(repo_upstream "$path")" ]]; then
+        git_logged_capture "$path" pull --no-tags --rebase --recurse-submodules=on-demand || {
+          SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+          status FAIL "$name: $SYNC_LAST_REASON"
+          return 20
+        }
+      else
+        git_logged_capture "$path" pull --no-tags --rebase --recurse-submodules=on-demand origin "$branch" || {
+          SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+          status FAIL "$name: $SYNC_LAST_REASON"
+          return 20
+        }
+      fi
       ;;
     merge)
-      git_logged_capture "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand || {
-        SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
-        status FAIL "$name: $SYNC_LAST_REASON"
-        return 20
-      }
+      if [[ -n "$(repo_upstream "$path")" ]]; then
+        git_logged_capture "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand || {
+          SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+          status FAIL "$name: $SYNC_LAST_REASON"
+          return 20
+        }
+      else
+        git_logged_capture "$path" pull --no-tags --no-rebase --recurse-submodules=on-demand origin "$branch" || {
+          SYNC_LAST_REASON="$(sync_failure_reason "pull failed")"
+          status FAIL "$name: $SYNC_LAST_REASON"
+          return 20
+        }
+      fi
       ;;
     *)
       SYNC_LAST_REASON="Unknown strategy: $strategy"
@@ -1006,6 +1161,10 @@ cmd_sync() {
   local fetch_result_files=()
   local fetch_log_files=()
   local fetch_pids=()
+  local fetch_done_flags=()
+  local fetch_job_count
+  fetch_job_count="$(repo_sync_job_count)"
+  repo_sync_fetch_attempts >/dev/null
 
   if [[ ${#targets[@]} -gt 0 ]]; then
     local target line
@@ -1035,36 +1194,64 @@ cmd_sync() {
   local sync_tmp_dir
   sync_tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync.XXXXXX")" || die "cannot create temp dir"
 
-  printf '%bPhase 1:%b fetch and check updates (%s repos in parallel)\n' "$C_BOLD" "$C_RESET" "${#selected_names[@]}"
+  printf '%bPhase 1:%b fetch and check updates (%s repos, up to %s parallel)\n' "$C_BOLD" "$C_RESET" "${#selected_names[@]}" "$fetch_job_count"
   for ((index = 0; index < ${#selected_names[@]}; index++)); do
     fetch_result_files+=("$sync_tmp_dir/$index.result")
     fetch_log_files+=("$sync_tmp_dir/$index.log")
-    sync_fetch_plan_worker "${selected_names[$index]}" "${selected_paths[$index]}" "${selected_strategies[$index]}" "${fetch_result_files[$index]}" "${fetch_log_files[$index]}" &
-    fetch_pids+=("$!")
+    fetch_pids+=("")
+    fetch_done_flags+=("false")
   done
 
-  local fetch_total="${#fetch_pids[@]}"
+  local fetch_total="${#selected_names[@]}"
   local fetch_done=0
+  local fetch_running=0
+  local next_fetch_index=0
   local frame_index=0
-  if can_live_update_list; then
-    while [[ "$fetch_done" -lt "$fetch_total" ]]; do
-      fetch_done=0
-      for ((index = 0; index < fetch_total; index++)); do
-        [[ -s "${fetch_result_files[$index]}" ]] && fetch_done=$((fetch_done + 1))
-      done
-      printf '\r%b%s%b (%s/%s)' "$C_BLUE" "$(list_spinner_label "$frame_index")" "$C_RESET" "$fetch_done" "$fetch_total"
-      if [[ "$fetch_done" -lt "$fetch_total" ]]; then
-        sleep 0.08
-        frame_index=$((frame_index + 1))
+
+  if ! can_live_update_list && [[ "$fetch_total" -gt 0 ]]; then
+    printf 'Fetching %s repositories (up to %s in parallel)...\n' "$fetch_total" "$fetch_job_count"
+  fi
+
+  while [[ "$fetch_done" -lt "$fetch_total" ]]; do
+    while [[ "$next_fetch_index" -lt "$fetch_total" && "$fetch_running" -lt "$fetch_job_count" ]]; do
+      sync_fetch_plan_worker "${selected_names[$next_fetch_index]}" "${selected_paths[$next_fetch_index]}" "${selected_strategies[$next_fetch_index]}" "${fetch_result_files[$next_fetch_index]}" "${fetch_log_files[$next_fetch_index]}" &
+      fetch_pids[$next_fetch_index]="$!"
+      next_fetch_index=$((next_fetch_index + 1))
+      fetch_running=$((fetch_running + 1))
+    done
+
+    local made_progress="false"
+    for ((index = 0; index < fetch_total; index++)); do
+      [[ "${fetch_done_flags[$index]}" == "true" ]] && continue
+      [[ -n "${fetch_pids[$index]:-}" ]] || continue
+      if [[ -s "${fetch_result_files[$index]}" ]]; then
+        wait "${fetch_pids[$index]}" >/dev/null 2>&1 || true
+        fetch_pids[$index]=""
+        fetch_done_flags[$index]="true"
+        fetch_done=$((fetch_done + 1))
+        fetch_running=$((fetch_running - 1))
+        made_progress="true"
       fi
     done
+
+    if can_live_update_list; then
+      printf '\r%b%s%b (%s/%s)' "$C_BLUE" "$(list_spinner_label "$frame_index")" "$C_RESET" "$fetch_done" "$fetch_total"
+    fi
+
+    if [[ "$fetch_done" -lt "$fetch_total" ]]; then
+      sleep 0.08
+      frame_index=$((frame_index + 1))
+    fi
+  done
+
+  if can_live_update_list; then
     printf '\r%*s\r' 40 ''
-  elif [[ "$fetch_total" -gt 0 ]]; then
-    printf 'Fetching %s repositories...\n' "$fetch_total"
   fi
 
   for ((index = 0; index < ${#fetch_pids[@]}; index++)); do
-    wait "${fetch_pids[$index]}" >/dev/null 2>&1 || true
+    if [[ -n "${fetch_pids[$index]:-}" ]]; then
+      wait "${fetch_pids[$index]}" >/dev/null 2>&1 || true
+    fi
   done
 
   local fetch_exit_code fetch_reason fetch_branch fetch_upstream fetch_update_count fetch_dirty

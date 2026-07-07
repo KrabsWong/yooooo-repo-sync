@@ -72,18 +72,23 @@ Dirty working trees are marked in `list` and in the final `sync` result:
 ## Sync behavior
 
 - Default strategy is `rebase`.
-- `list` fetches repository metadata in parallel, then shows whether the current branch has updates from its configured upstream, or from `origin/<current-branch>` when no upstream is configured.
+- `list` fetches repository metadata with bounded parallelism, then shows whether the current branch has updates from its configured upstream, or from `origin/<current-branch>` when no upstream is configured.
 - `list` shows `dirty` when a repository has staged, unstaged, or untracked local changes.
 - `list` fetches branch refs only; it does not fetch tags, so tag conflicts do not block branch update checks.
+- If `list` cannot refresh a repository but already has local tracking refs, it falls back to those refs instead of showing `unknown`.
 - In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
 - Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
 - `list --no-fetch` skips network fetches and checks local tracking refs only.
-- `sync` first fetches branches and tags for every selected repository in parallel, forcing local tags to match remote tags when names collide.
+- `list` and `sync` fetch up to 4 repositories at a time by default. Set `REPO_SYNC_JOBS` to change that limit.
+- Fetch operations try twice by default. Set `REPO_SYNC_FETCH_ATTEMPTS` to change that limit.
+- `sync` first fetches branches and tags for every selected repository with bounded parallelism, forcing local tags to match remote tags when names collide.
+- `sync` checks the current branch in each repository. If that branch has no configured upstream, it falls back to `origin/<current-branch>`; it does not assume `main` or `master`.
 - During the fetch pass, `sync` shows compact progress instead of full fetch output.
 - After the fetch pass, `sync` immediately skips repositories with no remote updates, then serially updates only repositories that do have updates.
-- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, failed items include error reasons, and dirty repositories are marked with `local dirty`.
+- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, failed items include error reasons, and dirty repositories are marked with `local dirty`. Skipped items omit the redundant no-update reason.
 - `rebase` runs `git pull --no-tags --rebase --recurse-submodules=on-demand`.
 - `merge` runs `git pull --no-tags --no-rebase --recurse-submodules=on-demand`.
+- When syncing a branch without configured upstream, the pull command includes `origin <current-branch>` explicitly.
 - Repositories registered with `--submodules` also run:
 
 ```bash
