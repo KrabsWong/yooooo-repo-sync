@@ -78,6 +78,7 @@ Dirty working trees are marked in `list` and in the final `sync` result:
 - If `list` cannot refresh a repository but already has local tracking refs, it falls back to those refs instead of showing `unknown`.
 - In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
 - Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
+- Displayed paths inside the current user's home directory use `~` to keep output compact; stored repository paths remain absolute.
 - `list --no-fetch` skips network fetches and checks local tracking refs only.
 - `list` and `sync` fetch up to 4 repositories at a time by default. Set `REPO_SYNC_JOBS` to change that limit.
 - Fetch operations try twice by default. Set `REPO_SYNC_FETCH_ATTEMPTS` to change that limit.

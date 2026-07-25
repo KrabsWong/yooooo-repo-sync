@@ -85,8 +85,8 @@ repo_sync_fetch_attempts() {
 }
 
 ensure_config() {
-  mkdir -p "$CONFIG_DIR" || die "cannot create config dir: $CONFIG_DIR"
-  touch "$CONFIG_FILE" || die "cannot write config file: $CONFIG_FILE"
+  mkdir -p "$CONFIG_DIR" || die "cannot create config dir: $(display_path "$CONFIG_DIR")"
+  touch "$CONFIG_FILE" || die "cannot write config file: $(display_path "$CONFIG_FILE")"
 }
 
 abs_path() {
@@ -101,6 +101,22 @@ abs_path() {
   local base
   base="$(basename "$path")"
   (cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base")
+}
+
+display_path() {
+  local path="$1"
+  local home="${HOME:-}"
+
+  if [[ -n "$home" && "$home" != "/" ]]; then
+    home="${home%/}"
+    case "$path" in
+      "$home") printf '~\n' ;;
+      "$home"/*) printf '~%s\n' "${path#"$home"}" ;;
+      *) printf '%s\n' "$path" ;;
+    esac
+  else
+    printf '%s\n' "$path"
+  fi
 }
 
 validate_strategy() {
@@ -218,10 +234,10 @@ cmd_add() {
     esac
   done
 
-  is_git_repo "$path" || die "not a git repository: $path"
+  is_git_repo "$path" || die "not a git repository: $(display_path "$path")"
   ensure_config
   name_exists "$name" && die "repository name already exists: $name"
-  path_exists "$path" && die "repository path already exists: $path"
+  path_exists "$path" && die "repository path already exists: $(display_path "$path")"
 
   if [[ "$submodules" == "auto" ]]; then
     if [[ -f "$path/.gitmodules" ]]; then
@@ -233,7 +249,7 @@ cmd_add() {
 
   printf '%s\t%s\t%s\t%s\n' "$name" "$path" "$strategy" "$submodules" >> "$CONFIG_FILE"
   sort_config
-  echo "Added: $name -> $path ($strategy, submodules=$submodules)"
+  echo "Added: $name -> $(display_path "$path") ($strategy, submodules=$submodules)"
 }
 
 print_list_header() {
@@ -285,7 +301,7 @@ print_list_row_no_newline() {
   print_colored_field "$LIST_SUBMODULES_WIDTH" "$submodules" "$(list_submodules_color "$submodules")"
   printf '  '
   print_colored_field "$LIST_UPDATES_WIDTH" "$updates" "$(list_updates_color "$updates")"
-  printf '  %b%s%b' "$C_DIM" "$path" "$C_RESET"
+  printf '  %b%s%b' "$C_DIM" "$(display_path "$path")" "$C_RESET"
 }
 
 print_list_row() {
@@ -388,7 +404,7 @@ cmd_list_live_fetch() {
   local tmp_dir
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync-list.XXXXXX")" || die "cannot create temp dir"
 
-  echo "Config: $CONFIG_FILE"
+  echo "Config: $(display_path "$CONFIG_FILE")"
   print_list_header
 
   local row_count="${#names[@]}"
@@ -517,7 +533,7 @@ cmd_list_parallel_plain() {
     fi
   done
 
-  echo "Config: $CONFIG_FILE"
+  echo "Config: $(display_path "$CONFIG_FILE")"
   print_list_header
 
   local updates
@@ -552,7 +568,7 @@ cmd_list() {
   done
 
   if [[ ! -s "$CONFIG_FILE" ]]; then
-    echo "No repositories registered. Config: $CONFIG_FILE"
+    echo "No repositories registered. Config: $(display_path "$CONFIG_FILE")"
     return
   fi
 
@@ -587,7 +603,7 @@ cmd_remove() {
   done < "$CONFIG_FILE"
 
   mv "$tmp" "$CONFIG_FILE"
-  echo "Removed: $old_name -> $old_path"
+  echo "Removed: $old_name -> $(display_path "$old_path")"
 }
 
 cmd_set() {
@@ -640,9 +656,9 @@ cmd_set() {
     esac
   done
 
-  is_git_repo "$new_path" || die "not a git repository: $new_path"
+  is_git_repo "$new_path" || die "not a git repository: $(display_path "$new_path")"
   name_exists "$new_name" "$old_name" && die "repository name already exists: $new_name"
-  path_exists "$new_path" "$old_name" && die "repository path already exists: $new_path"
+  path_exists "$new_path" "$old_name" && die "repository path already exists: $(display_path "$new_path")"
 
   local tmp
   tmp="$(mktemp "$CONFIG_DIR/repos.XXXXXX")" || die "cannot create temp file"
@@ -659,7 +675,7 @@ cmd_set() {
 
   mv "$tmp" "$CONFIG_FILE"
   sort_config
-  echo "Updated: $new_name -> $new_path ($new_strategy, submodules=$new_submodules)"
+  echo "Updated: $new_name -> $(display_path "$new_path") ($new_strategy, submodules=$new_submodules)"
 }
 
 SYNC_LAST_COMMAND_OUTPUT=""
@@ -667,7 +683,7 @@ SYNC_LAST_COMMAND_OUTPUT=""
 git_logged_capture() {
   local repo_path="$1"
   shift
-  printf '%b$%b git -C %s %s\n' "$C_DIM" "$C_RESET" "$repo_path" "$*"
+  printf '%b$%b git -C %s %s\n' "$C_DIM" "$C_RESET" "$(display_path "$repo_path")" "$*"
   SYNC_LAST_COMMAND_OUTPUT="$(git -C "$repo_path" "$@" 2>&1)"
   local exit_code=$?
   if [[ -n "$SYNC_LAST_COMMAND_OUTPUT" ]]; then
@@ -716,9 +732,9 @@ git_logged_fetch_with_retry() {
 
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     if [[ "$attempt" -eq 1 ]]; then
-      printf '%b$%b git -C %s fetch --prune --tags --force\n' "$C_DIM" "$C_RESET" "$repo_path"
+      printf '%b$%b git -C %s fetch --prune --tags --force\n' "$C_DIM" "$C_RESET" "$(display_path "$repo_path")"
     else
-      printf '%b$%b git -C %s fetch --prune --tags --force  # retry %s/%s\n' "$C_DIM" "$C_RESET" "$repo_path" "$attempt" "$attempts"
+      printf '%b$%b git -C %s fetch --prune --tags --force  # retry %s/%s\n' "$C_DIM" "$C_RESET" "$(display_path "$repo_path")" "$attempt" "$attempts"
     fi
 
     SYNC_LAST_COMMAND_OUTPUT="$(git -C "$repo_path" fetch --prune --tags --force 2>&1)"
@@ -873,15 +889,15 @@ sync_fetch_plan_one() {
   SYNC_PLAN_UPDATE_COUNT=0
   SYNC_PLAN_DIRTY="false"
 
-  printf '\n%b==>%b %bfetch/check%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
+  printf '\n%b==>%b %bfetch/check%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$(display_path "$path")" "$C_RESET"
 
   if [[ ! -d "$path" ]]; then
-    SYNC_LAST_REASON="Path does not exist: $path"
+    SYNC_LAST_REASON="Path does not exist: $(display_path "$path")"
     status FAIL "$SYNC_LAST_REASON"
     return 20
   fi
   if ! is_git_repo "$path"; then
-    SYNC_LAST_REASON="Not a git repository: $path"
+    SYNC_LAST_REASON="Not a git repository: $(display_path "$path")"
     status FAIL "$SYNC_LAST_REASON"
     return 20
   fi
@@ -983,7 +999,7 @@ sync_update_one() {
   SYNC_LAST_DIFFSTAT=""
   SYNC_LAST_DIRTY="$planned_dirty"
 
-  printf '\n%b==>%b %bupdate%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$path" "$C_RESET"
+  printf '\n%b==>%b %bupdate%b %b%s%b %b(%s)%b\n' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$(display_path "$path")" "$C_RESET"
   status INFO "branch=$branch, compare=$upstream, strategy=$strategy, remote updates=$update_count"
 
   local dirty
@@ -1088,7 +1104,7 @@ print_sync_section() {
     IFS=$'\t' read -r name path detail <<< "$item"
     printf '  '
     print_colored_field "$LIST_NAME_WIDTH" "$name" "$C_BOLD"
-    printf '  %b%s%b' "$C_DIM" "$path" "$C_RESET"
+    printf '  %b%s%b' "$C_DIM" "$(display_path "$path")" "$C_RESET"
     if [[ -n "${detail:-}" ]]; then
       printf '  | %s' "$detail"
     fi
@@ -1346,7 +1362,7 @@ main() {
     sync) cmd_sync "$@" ;;
     config)
       ensure_config
-      echo "$CONFIG_FILE"
+      display_path "$CONFIG_FILE"
       ;;
     -h|--help|help)
       usage
