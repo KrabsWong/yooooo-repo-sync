@@ -1,102 +1,79 @@
 # yooooo-repo-sync
 
-Shell helper for batch-syncing local Git repositories.
+一个使用 Rust 编写的本地 Git 仓库同步工具，提供交互式终端界面（TUI）和命令行（CLI）。
 
-## Check list
+## 仓库管理
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/d1889b12-8b75-4359-9608-c0e4aa9588d5" />
+- 添加、编辑和移除本地仓库记录。
+- 为每个仓库设置 `rebase` 或 `merge` 策略，以及是否同步子模块。
+- 通过仓库名称或路径指定操作目标。
+- 移除记录不会删除仓库文件。
+- 配置写入采用文件锁和冲突检查，防止多个实例覆盖彼此的修改。
 
-## Sync result
+## 交互式终端界面
 
-<img width="800" height="677" alt="image" src="https://github.com/user-attachments/assets/825539ef-b96f-453f-8ef4-ad65d22066f7" />
+运行 `repo-sync` 或 `repo-sync tui` 打开界面。
 
-## Config is stored beside the script:
+- 顶部颜色条集中显示当前阶段、完成数量、百分比和结果统计。
+- 就绪、抓取、排队、同步、完成和异常使用不同颜色，并保留明确的文字标签。
+- 运行结束后持续显示完成摘要，区分成功结束与存在失败的情况。
+- 仓库列表按内容占用高度，详情和快捷键紧随其后；长列表可滚动，窄窗口优先显示仓库名称和状态。
+- 支持同步当前仓库、标记的仓库或全部仓库。
+- 支持多个同步批次并行运行，自动跳过正在同步的仓库。
+- 退出时等待正在执行的 Git 操作结束或超时。
+- 支持通过 `NO_COLOR` 禁用颜色。
 
-```text
-repo-sync-data/repos.tsv
-```
+| 按键 | 功能 |
+| --- | --- |
+| `↑` / `k`、`↓` / `j` | 移动选择 |
+| `Space` | 标记或取消标记仓库 |
+| `s` | 同步标记的仓库，未标记时同步当前仓库 |
+| `S` | 同步全部仓库 |
+| `r` | 刷新远端状态 |
+| `a` / `e` / `d` | 添加、编辑或移除仓库记录 |
+| `?` | 查看帮助 |
+| `q` | 退出 |
 
-You can override it:
+TUI 禁用交互式 Git 和 SSH 认证提示；需要预先配置认证。无参数运行时，如果输入或输出不是终端，则显示帮助。
 
-```bash
-export REPO_SYNC_HOME=/path/to/repo-sync-data
-```
+## 命令行功能
 
-## Install
+| 命令 | 功能 |
+| --- | --- |
+| `repo-sync add <path>` | 注册本地仓库 |
+| `repo-sync list` | 刷新并列出仓库状态 |
+| `repo-sync list --no-fetch` | 仅使用本地追踪引用查看状态 |
+| `repo-sync set <name-or-path>` | 修改名称、路径、同步策略或子模块设置 |
+| `repo-sync remove <name-or-path>` | 移除仓库记录 |
+| `repo-sync sync [name-or-path ...]` | 同步指定仓库，不指定时同步全部仓库 |
+| `repo-sync config` | 查看配置文件位置 |
 
-```bash
-chmod +x repo-sync.sh
-```
+`add` 和 `set` 支持 `--name`、`--strategy rebase|merge`、`--submodules` 和 `--no-submodules`；`set` 还支持 `--path`。`sync` 支持使用 `--strategy` 指定本次同步策略。
 
-Optional:
+CLI 实时输出同步进度，并将结果汇总为 `Updated`、`Skipped` 和 `Failed`。任何仓库失败时，命令返回非零退出状态。
 
-```bash
-ln -s /absolute/path/to/repo-sync.sh /usr/local/bin/repo-sync
-```
+## 同步行为
 
-## Commands
+- 并发抓取和检查仓库，同一批次中的更新依次执行；不同批次共享抓取并发上限。
+- 默认使用 `rebase`，也可按仓库或单次操作选择 `merge`。
+- 优先使用当前分支配置的上游；未配置时尝试 `origin/<当前分支>`。已配置的上游不可用时明确报错，不切换到其他远端。
+- 保留本地修改，不自动暂存或丢弃。工作区有修改时仍尝试同步，冲突或 Git 拒绝操作时报告失败。
+- 同步时强制刷新标签，使冲突的本地标签与远端一致；查看列表时不抓取标签。
+- 启用子模块的仓库会递归同步、初始化和更新子模块，即使主仓库没有新提交，也可以重试子模块同步。
+- Git 命令支持超时，抓取失败支持重试。
 
-```bash
-./repo-sync.sh add ~/code/project-a
-./repo-sync.sh add ~/code/project-b --strategy merge
-./repo-sync.sh add ~/code/project-c --submodules
+## 配置
 
-./repo-sync.sh list
-./repo-sync.sh list --fetch
-./repo-sync.sh list --no-fetch
+仓库记录保存在 `repo-sync-data/repos.tsv`。可通过 `REPO_SYNC_HOME` 指定配置目录，使用 `repo-sync config` 查看实际位置。
 
-./repo-sync.sh set project-a --strategy merge
-./repo-sync.sh set project-a --path ~/new-code/project-a
-./repo-sync.sh set project-a --name new-project-a
-./repo-sync.sh set project-a --submodules
+| 环境变量 | 功能 | 默认值 |
+| --- | --- | --- |
+| `REPO_SYNC_HOME` | 配置目录 | 根据可执行文件位置确定 |
+| `REPO_SYNC_JOBS` | 抓取并发上限 | `4` |
+| `REPO_SYNC_FETCH_ATTEMPTS` | 抓取尝试次数 | `2` |
+| `REPO_SYNC_TIMEOUT_SECS` | 单条 Git 命令超时秒数 | `30` |
+| `NO_COLOR` | 设置后禁用 TUI 颜色 | 未设置 |
 
-./repo-sync.sh remove project-a
+## 许可证
 
-./repo-sync.sh sync
-./repo-sync.sh sync project-a project-b
-./repo-sync.sh sync --strategy rebase
-./repo-sync.sh sync --strategy merge
-```
-
-Dirty working trees are marked in `list` and in the final `sync` result:
-
-```bash
-./repo-sync.sh list
-./repo-sync.sh sync
-```
-
-`sync` still attempts the update when local changes are present. If Git cannot update that repository cleanly, it appears in `Failed` with the local-dirty marker and the Git error.
-
-`--allow-dirty` is still accepted for compatibility.
-
-## Sync behavior
-
-- Default strategy is `rebase`.
-- `list` fetches repository metadata with bounded parallelism, then shows whether the current branch has updates from its configured upstream, or from `origin/<current-branch>` when no upstream is configured.
-- `list` shows `dirty` when a repository has staged, unstaged, or untracked local changes.
-- `list` fetches branch refs only; it does not fetch tags, so tag conflicts do not block branch update checks.
-- If `list` cannot refresh a repository but already has local tracking refs, it falls back to those refs instead of showing `unknown`.
-- In interactive terminals, `list` prints rows immediately, shows a smooth spinner while each repository fetches, then updates each row in place.
-- Interactive `list` output uses color to distinguish update states and lower-emphasis metadata.
-- Displayed paths inside the current user's home directory use `~` to keep output compact; stored repository paths remain absolute.
-- `list --no-fetch` skips network fetches and checks local tracking refs only.
-- `list` and `sync` fetch up to 4 repositories at a time by default. Set `REPO_SYNC_JOBS` to change that limit.
-- Fetch operations try twice by default. Set `REPO_SYNC_FETCH_ATTEMPTS` to change that limit.
-- `sync` first fetches branches and tags for every selected repository with bounded parallelism, forcing local tags to match remote tags when names collide.
-- `sync` checks the current branch in each repository. If that branch has no configured upstream, it falls back to `origin/<current-branch>`; it does not assume `main` or `master`.
-- During the fetch pass, `sync` shows compact progress instead of full fetch output.
-- After the fetch pass, `sync` immediately skips repositories with no remote updates, then serially updates only repositories that do have updates.
-- The final `sync` output groups results into `Updated`, `Skipped`, and `Failed` sections with counts. Each item includes the local path; updated items include code diff stats, failed items include error reasons, and dirty repositories are marked with `local dirty`. Skipped items omit the redundant no-update reason.
-- `rebase` runs `git pull --no-tags --rebase --recurse-submodules=on-demand`.
-- `merge` runs `git pull --no-tags --no-rebase --recurse-submodules=on-demand`.
-- When syncing a branch without configured upstream, the pull command includes `origin <current-branch>` explicitly.
-- Repositories registered with `--submodules` also run:
-
-```bash
-git submodule sync --recursive
-git submodule update --init --recursive
-```
-
-## License
-
-GNU Affero General Public License v3.0.
+GNU Affero General Public License v3.0。

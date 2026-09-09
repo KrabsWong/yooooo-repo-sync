@@ -11,3 +11,6 @@ repo-sync-data/repos.*
 *.log
 tmp/
 temp/
+
+# Rust build artifacts.
+target/

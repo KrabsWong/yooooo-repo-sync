@@ -1,0 +1,22 @@
+[package]
+name = "yooooo-repo-sync"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal UI and CLI for synchronizing local Git repositories"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "repo-sync"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+# The alternate Unix backend handles terminal EOF without stalling event::poll.
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
+libc = "0.2"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3.17"
